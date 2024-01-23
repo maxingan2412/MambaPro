@@ -1,9 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="root@10.8.131.51:30998 password (14)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="root@10.8.131.51:30998 password (17)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="root@10.8.131.51:30998 password (14)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/13994058190/WYH/MM_CLIP" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@10.8.131.51:30998 password (15)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/13994058190/WYH/MM_CLIP" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@10.8.131.51:30998 password (16)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/13994058190/WYH/MM_CLIP" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@10.8.131.51:30998 password (17)">
         <serverdata>
           <mappings>
             <mapping deploy="/13994058190/WYH/MM_CLIP" local="$PROJECT_DIR$" />

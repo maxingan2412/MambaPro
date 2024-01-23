@@ -1,4 +1,6 @@
 #!/bin/bash
-source activate (your env)
-pip install scikit-learn
-python train_net.py --config_file /15127306268/wyh/MM/configs/RGBNTMSVR310/vit_top_re.yml
+source activate base
+cd /13994058190/WYH/MM_CLIP
+pip install timm
+pip install ftfy
+python train_net.py --config_file /13994058190/WYH/MM_CLIP/configs/MSVR310/TOP-ReID.yml

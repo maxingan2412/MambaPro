@@ -39,5 +39,4 @@ if __name__ == "__main__":
     train_loader, train_loader_normal, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
 
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
-    model.load_param('')
     do_inference(cfg,model,val_loader,num_query)

@@ -173,8 +173,7 @@ def make_model(cfg, num_class, camera_num, view_num):
 
 from .clip import clip
 def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_size):
-    url = clip._MODELS[backbone_name]
-    model_path = clip._download(url)
+    model_path = '/13994058190/WYH/PTH/ViT-B-16.pt'
 
     try:
         # loading JIT archive
