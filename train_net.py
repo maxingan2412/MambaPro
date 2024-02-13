@@ -68,9 +68,7 @@ if __name__ == '__main__':
     train_loader, train_loader_normal, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
     print("data is ready")
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
-    # if cfg.MODEL.STAGE==2:
-    #     model.load_param('/13994058190/WYH/MM_CLIP/RGBNT201/TOP-ReID-1_20/TOPReIDbest.pth')
-    #     print("load model from STAGE 1，now is STAGE 2")
+
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
 
     optimizer, optimizer_center = make_optimizer(cfg, model, center_criterion)

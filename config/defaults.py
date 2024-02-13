@@ -29,6 +29,7 @@ _C.MODEL.IF_WITH_CENTER = 'no'
 _C.MODEL.ID_LOSS_TYPE = 'softmax'
 _C.MODEL.ID_LOSS_WEIGHT = 1.0
 _C.MODEL.TRIPLET_LOSS_WEIGHT = 1.0
+_C.MODEL.FLOPS_TEST = False
 # The loss type of metric loss
 # options:['triplet'](without center loss) or ['center','triplet_center'](with center loss)
 _C.MODEL.METRIC_LOSS_TYPE = 'triplet'

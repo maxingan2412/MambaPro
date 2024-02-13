@@ -56,6 +56,7 @@ class build_transformer(nn.Module):
         self.model_name = cfg.MODEL.TRANSFORMER_TYPE
         self.in_planes = 768
         self.trans_type = cfg.MODEL.TRANSFORMER_TYPE
+        self.flops_test = cfg.MODEL.FLOPS_TEST
         if 't2t' in cfg.MODEL.TRANSFORMER_TYPE:
             self.in_planes = 512
         if 'edge' in cfg.MODEL.TRANSFORMER_TYPE or cfg.MODEL.TRANSFORMER_TYPE == 'deit_small_patch16_224':
@@ -124,6 +125,8 @@ class build_transformer(nn.Module):
             x = self.base(x, cam_label=cam_label, view_label=view_label)
         else:
             if self.cv_embed_sign:
+                if self.flops_test:
+                    cam_label = 0
                 cv_embed = self.sie_xishu * self.cv_embed[cam_label]
             else:
                 cv_embed = None
@@ -157,6 +160,74 @@ class build_transformer(nn.Module):
         print('Loading pretrained model for finetuning from {}'.format(model_path))
 
 
+class BASE(nn.Module):
+    def __init__(self, num_classes, cfg, camera_num, view_num, factory):
+        super(BASE, self).__init__()
+        self.BACKBONE = build_transformer(num_classes, cfg, camera_num, view_num, factory)
+        self.num_classes = num_classes
+        self.cfg = cfg
+        self.num_instance = cfg.DATALOADER.NUM_INSTANCE
+        self.camera = camera_num
+        self.view = view_num
+        self.direct = cfg.MODEL.DIRECT
+        if cfg.MODEL.STAGE == 1:
+            self.direct = 0
+        self.neck = cfg.MODEL.NECK
+        self.neck_feat = cfg.TEST.NECK_FEAT
+        self.ID_LOSS_TYPE = cfg.MODEL.ID_LOSS_TYPE
+        self.mix_dim = 512
+
+        self.classifier = nn.Linear(3 * self.mix_dim, self.num_classes, bias=False)
+        self.classifier.apply(weights_init_classifier)
+        self.bottleneck = nn.BatchNorm1d(3 * self.mix_dim)
+        self.bottleneck.bias.requires_grad_(False)
+        self.bottleneck.apply(weights_init_kaiming)
+
+    def load_param(self, trained_path):
+        param_dict = torch.load(trained_path)
+        for i in param_dict:
+            self.state_dict()[i].copy_(param_dict[i])
+        print('Loading pretrained model from {}'.format(trained_path))
+
+
+    def forward(self, x, label=None, cam_label=None, view_label=None):
+        if self.training:
+            RGB = x['RGB']
+            NI = x['NI']
+            TI = x['TI']
+
+            RGB_cash, RGB_score, RGB_global = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label,
+                                                            modality='rgb')
+            NI_cash, NI_score, NI_global = self.BACKBONE(NI, cam_label=cam_label, view_label=view_label, modality='nir')
+            TI_cash, TI_score, TI_global = self.BACKBONE(TI, cam_label=cam_label, view_label=view_label, modality='tir')
+
+            if self.direct:
+                ori = torch.cat([RGB_global, NI_global, TI_global], dim=-1)
+                ori_global = self.bottleneck(ori)
+                ori_score = self.classifier(ori_global)
+                return ori_score, ori
+            else:
+                return RGB_score, RGB_global, NI_score, NI_global, TI_score, TI_global
+
+        else:
+            RGB = x['RGB']
+            NI = x['NI']
+            TI = x['TI']
+            RGB_cash, RGB_global = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label, modality='rgb')
+            NI_cash, NI_global = self.BACKBONE(NI, cam_label=cam_label, view_label=view_label, modality='nir')
+            TI_cash, TI_global = self.BACKBONE(TI, cam_label=cam_label, view_label=view_label, modality='tir')
+            ori = torch.cat([RGB_global, NI_global, TI_global], dim=-1)
+            ori_global = self.bottleneck(ori)
+
+            if self.neck_feat == 'after':
+                pass
+            else:
+                ori_global = ori
+            return torch.cat([ori_global], dim=-1)
+
+
+
+
 class BASELINE(nn.Module):
     def __init__(self, num_classes, cfg, camera_num, view_num, factory):
         super(BASELINE, self).__init__()
@@ -174,7 +245,8 @@ class BASELINE(nn.Module):
         self.ID_LOSS_TYPE = cfg.MODEL.ID_LOSS_TYPE
         self.mix_dim = 512
 
-        self.AAM = AAM(self.mix_dim)
+        self.AAM = AAM(self.mix_dim, n_layers=2,cfg=cfg)
+        # self.AAM = MambaFsuion(d_model=self.mix_dim, n_layers=2)
         self.miss_type = cfg.TEST.MISS
         self.classifier = nn.Linear(3 * self.mix_dim, self.num_classes, bias=False)
         self.classifier.apply(weights_init_classifier)
@@ -182,22 +254,12 @@ class BASELINE(nn.Module):
         self.bottleneck.bias.requires_grad_(False)
         self.bottleneck.apply(weights_init_kaiming)
 
-        self.classifier_fuse = nn.Linear(3*self.mix_dim, self.num_classes, bias=False)
+        self.classifier_fuse = nn.Linear(3 * self.mix_dim, self.num_classes, bias=False)
         self.classifier_fuse.apply(weights_init_classifier)
-        self.bottleneck_fuse = nn.BatchNorm1d(3*self.mix_dim)
+        self.bottleneck_fuse = nn.BatchNorm1d(3 * self.mix_dim)
         self.bottleneck_fuse.bias.requires_grad_(False)
         self.bottleneck_fuse.apply(weights_init_kaiming)
 
-    def display_img(self, img):
-        # 对三通道或者单通道的图都可以进行展示
-        import matplotlib.pyplot as plt
-        import numpy as np
-        if img.dim() == 3 and img.size(0) == 3:
-            # 如果是三通道的图，那么就需要进行转置
-            img = img.cpu().numpy()
-            img = np.transpose(img, (1, 2, 0))
-            plt.imshow(img)
-            plt.show()
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)
@@ -205,12 +267,6 @@ class BASELINE(nn.Module):
             self.state_dict()[i].copy_(param_dict[i])
         print('Loading pretrained model from {}'.format(trained_path))
 
-    def compute_center(self, features):
-        # 沿着batch纬度，每隔range个特征平均一下
-        centers = []
-        for i in range(len(features)):
-            centers.append(torch.mean(features[i:i + self.num_instance], dim=0))
-        return centers
 
     def forward(self, x, label=None, cam_label=None, view_label=None):
         if self.training:
@@ -233,7 +289,7 @@ class BASELINE(nn.Module):
                 ori_score = self.classifier(ori_global)
                 return ori_score, ori, fuse_score, fuse
             else:
-                return RGB_score, RGB_global, NI_score, NI_global, TI_score, TI_global,fuse_score, fuse
+                return RGB_score, RGB_global, NI_score, NI_global, TI_score, TI_global, fuse_score, fuse
 
         else:
             RGB = x['RGB']
@@ -242,16 +298,14 @@ class BASELINE(nn.Module):
             RGB_cash, RGB_global = self.BACKBONE(RGB, cam_label=cam_label, view_label=view_label, modality='rgb')
             NI_cash, NI_global = self.BACKBONE(NI, cam_label=cam_label, view_label=view_label, modality='nir')
             TI_cash, TI_global = self.BACKBONE(TI, cam_label=cam_label, view_label=view_label, modality='tir')
-            ori = torch.cat([RGB_global, NI_global, TI_global], dim=-1)
-            ori_global = self.bottleneck(ori)
             fuse = self.AAM(RGB_cash, NI_cash, TI_cash)
             fuse_global = self.bottleneck_fuse(fuse)
 
             if self.neck_feat == 'after':
                 pass
             else:
-                ori_global = ori
-            return torch.cat([fuse], dim=-1)
+                fuse_global = fuse
+            return torch.cat([fuse_global], dim=-1)
 
 
 __factory_T_type = {

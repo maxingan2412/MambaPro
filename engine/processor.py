@@ -66,26 +66,10 @@ def do_train(cfg,
             with amp.autocast(enabled=True):
                 output = model(img, label=target, cam_label=target_cam, view_label=target_view)
                 loss = 0
-                if cfg.MODEL.STAGE ==1:
-                    rgb_fea = output[1]
-                    nir_fea = output[3]
-                    tir_fea = output[5]
-                    loss_r2n = xent(rgb_fea,nir_fea,target,target) + xent(nir_fea,rgb_fea,target,target)
-                    loss_r2t = xent(rgb_fea,tir_fea,target,target) + xent(tir_fea,rgb_fea,target,target)
-                    loss_n2t = xent(nir_fea,tir_fea,target,target) + xent(tir_fea,nir_fea,target,target)
-                    loss = loss_r2n + loss_r2t + loss_n2t
-                else:
-                    if cfg.MODEL.RE:
-                        index = len(output) - 1
-                        for i in range(0, index, 2):
-                            loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
-                            loss = loss + loss_tmp
-                        loss = loss + output[-1]
-                    else:
-                        index = len(output)
-                        for i in range(0, index, 2):
-                            loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
-                            loss = loss + loss_tmp
+                index = len(output)
+                for i in range(0, index, 2):
+                    loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam)
+                    loss = loss + loss_tmp
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
