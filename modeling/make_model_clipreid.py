@@ -172,8 +172,8 @@ def make_model(cfg, num_class, camera_num, view_num):
 
 
 from .clip import clip
-def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_size):
-    model_path = '/13994058190/WYH/PTH/ViT-B-16.pt'
+def load_clip_to_cpu(cfg,backbone_name, h_resolution, w_resolution, vision_stride_size):
+    model_path = '../PTH/ViT-B-16.pt'
 
     try:
         # loading JIT archive
@@ -183,7 +183,7 @@ def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_si
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
 
-    model = clip.build_model(state_dict or model.state_dict(), h_resolution, w_resolution, vision_stride_size)
+    model = clip.build_model(cfg,state_dict or model.state_dict(), h_resolution, w_resolution, vision_stride_size)
 
     return model
 

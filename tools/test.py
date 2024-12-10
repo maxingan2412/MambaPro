@@ -7,7 +7,7 @@ from engine.processor import do_inference
 from utils.logger import setup_logger
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TOPReID Testing")
+    parser = argparse.ArgumentParser(description="MambaPro Testing")
     parser.add_argument(
         "--config_file", default="", help="path to config file", type=str
     )
@@ -25,7 +25,7 @@ if __name__ == "__main__":
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    logger = setup_logger("TOPReID", output_dir, if_train=False)
+    logger = setup_logger("MambaPro", output_dir, if_train=False)
     logger.info(args)
 
     if args.config_file != "":
@@ -40,6 +40,6 @@ if __name__ == "__main__":
     train_loader, train_loader_normal, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
 
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
-    model.load_param("/path/to/your/TOPReIDbest.pth")
+    model.load_param("/path/to/your/.pth")
 
     do_inference(cfg,model,val_loader,num_query)

@@ -2,27 +2,18 @@ from modeling.backbones.vit_pytorch import Block
 import torch
 import torch.nn as nn
 from ..backbones.vit_pytorch import DropPath, trunc_normal_
-from ..backbones.vit_pytorch import Mlp
-# from modeling.fusion_part.mamba.mamba import Mamba, MambaConfig
-from modeling.fusion_part.mamba import SS2D
+from modeling.fusion_part.mamba import MM_SS2D
 
 
 class AAM(nn.Module):
-    def __init__(self, dim, n_layers,cfg):
+    def __init__(self, dim, n_layers, cfg):
         super().__init__()
-        self.transformer_block = nn.Sequential(*[SS2D(d_model=dim,cfg=cfg) for _ in range(n_layers)])
-        self.gate_r = nn.Sequential(nn.Linear(dim, 1),nn.Sigmoid())
-        self.gate_n = nn.Sequential(nn.Linear(dim, 1),nn.Sigmoid())
-        self.gate_t = nn.Sequential(nn.Linear(dim, 1),nn.Sigmoid())
-        # self.transformer_block = nn.Sequential(*[Block(dim, 8) for _ in range(n_layers)])
-        self.weight_r = nn.Sequential(nn.Linear( dim, 1),nn.Sigmoid())
-        self.weight_n = nn.Sequential(nn.Linear( dim, 1),nn.Sigmoid())
-        self.weight_t = nn.Sequential(nn.Linear( dim, 1),nn.Sigmoid())
-        self.linear_reduction_r = nn.Linear(2*dim, dim)
-        self.linear_reduction_n = nn.Linear(2*dim, dim)
-        self.linear_reduction_t = nn.Linear(2*dim, dim)
-        self.apply(self._init_weights)
+        self.ma_block = nn.Sequential(*[MM_SS2D(d_model=dim, cfg=cfg) for _ in range(n_layers)])
+        self.linear_reduction_r = nn.Sequential(nn.LayerNorm(dim * 2), nn.Linear(dim * 2, dim))
+        self.linear_reduction_n = nn.Sequential(nn.LayerNorm(dim * 2), nn.Linear(dim * 2, dim))
+        self.linear_reduction_t = nn.Sequential(nn.LayerNorm(dim * 2), nn.Linear(dim * 2, dim))
         print("AAM HERE!!!")
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -34,30 +25,21 @@ class AAM(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, r, n, t):
-        N = r.size(1)
-        r_cls = r[:, 0, :]
-        r_patch = r[:, 1:N - 4, :]
+        cls_r = r[:, 0]
+        cls_n = n[:, 0]
+        cls_t = t[:, 0]
+        r = r[:, 1:]
+        n = n[:, 1:]
+        t = t[:, 1:]
 
-        n_cls = n[:, 0, :]
-        n_patch = n[:, 1:N - 4, :]
+        # # standard mamba aggregation block
+        for i in range(len(self.ma_block)):
+            r, n, t = self.ma_block[i](r, n, t)
+        patch_r = torch.mean(r, dim=1)
+        patch_n = torch.mean(n, dim=1)
+        patch_t = torch.mean(t, dim=1)
 
-        t_cls = t[:, 0, :]
-        t_patch = t[:, 1:N - 4, :]
-
-
-        for i in range(len(self.transformer_block)):
-            new_r_patch,new_n_patch, new_t_patch = self.transformer_block[i](r_patch, n_patch, t_patch)
-
-        r_patch = torch.mean(new_r_patch, dim=1)
-        n_patch = torch.mean(new_n_patch, dim=1)
-        t_patch = torch.mean(new_t_patch, dim=1)
-
-        r_feature = self.linear_reduction_r(torch.cat([r_cls, r_patch], dim=-1))
-        n_feature = self.linear_reduction_n(torch.cat([n_cls, n_patch], dim=-1))
-        t_feature = self.linear_reduction_t(torch.cat([t_cls, t_patch], dim=-1))
-        return torch.cat([r_feature, n_feature, t_feature],dim=-1)
-        # weight_r = self.weight_r(x)
-        # weight_n = self.weight_n(x)
-        # weight_t = self.weight_t(x)
-        # cls = torch.cat([weight_r * r_cls.squeeze(), weight_n * n_cls.squeeze(), weight_t * t_cls.squeeze()], dim=-1)
-        # return cls
+        r_feature = self.linear_reduction_r(torch.cat([cls_r, patch_r], dim=-1))
+        n_feature = self.linear_reduction_n(torch.cat([cls_n, patch_n], dim=-1))
+        t_feature = self.linear_reduction_t(torch.cat([cls_t, patch_t], dim=-1))
+        return torch.cat([r_feature, n_feature, t_feature], dim=-1)

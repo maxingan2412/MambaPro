@@ -1,11 +1,10 @@
 import torch
-import numpy as np
 import os
 from utils.reranking import re_ranking
 import numpy as np
-import matplotlib.pyplot as plt
 from sklearn import manifold
-import random
+import matplotlib.pyplot as plt
+import seaborn as sns  # 使用Seaborn库绘制KDE图
 
 
 def euclidean_distance(qf, gf):
@@ -258,6 +257,30 @@ class R1_mAP_eval():
         self.pids.extend(np.asarray(pid))
         self.camids.extend(np.asarray(camid))
 
+    def showPointMultiModal(self, features, real_label, draw_label, save_path='..'):
+        id_show = 25
+        num_ids = len(np.unique(real_label))
+        save_path = os.path.join(save_path, str(draw_label) + ".pdf")
+        print("Draw points of features to {}".format(save_path))
+        indices = find_label_indices(real_label, draw_label, max_indices_per_label=id_show)
+        feat = features[indices]
+        tsne = manifold.TSNE(n_components=2, init='pca', random_state=1, learning_rate=100, perplexity=60)
+        features_tsne = tsne.fit_transform(feat)
+        colors = ['#1f78b4', '#33a02c', '#e31a1c', '#ff7f00', '#6a3d9a', '#b15928', '#a6cee3', '#b2df8a', '#fb9a99',
+                  '#fdbf6f', '#cab2d6', '#ffff99']
+        MARKS = ['*']
+        plt.figure(figsize=(10, 10))
+        for i in range(features_tsne.shape[0]):
+            plt.scatter(features_tsne[i, 0], features_tsne[i, 1], s=300, color=colors[i // id_show], marker=MARKS[0],
+                        alpha=0.4)
+        plt.title("t-SNE Visualization of Different IDs")
+        plt.xlabel("t-SNE Dimension 1")
+        plt.ylabel("t-SNE Dimension 2")
+        # plt.legend()
+        plt.savefig(save_path)
+        plt.show()
+        plt.close()
+
     def compute(self):  # called after each epoch
         feats = torch.cat(self.feats, dim=0)
         if self.feat_norm:
@@ -280,6 +303,121 @@ class R1_mAP_eval():
         else:
             print('=> Computing DistMat with euclidean_distance')
             distmat = euclidean_distance(qf, gf)
-
+        # self.showPointMultiModal(feats, real_label=self.pids,
+        #                          draw_label=[258, 260, 269, 271, 273, 280, 282, 284, 285, 286, 287, 289])
         cmc, mAP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids)
         return cmc, mAP, distmat, self.pids, self.camids, qf, gf
+
+
+def find_label_indices(label_list, target_labels, max_indices_per_label=1):
+    indices = []
+    counts = {label: 0 for label in target_labels}
+    for index, label in enumerate(label_list):
+        if label in target_labels and counts[label] < max_indices_per_label:
+            indices.append(index)
+            counts[label] += 1
+    sorted_indices = sorted(indices, key=lambda index: (label_list[index], index))
+    return sorted_indices
+
+
+def cosine_similarity(qf, gf):
+    epsilon = 0.00001
+    dist_mat = qf.mm(gf.t())
+    qf_norm = torch.norm(qf, p=2, dim=1, keepdim=True)  # mx1
+    gf_norm = torch.norm(gf, p=2, dim=1, keepdim=True)  # nx1
+    qg_normdot = qf_norm.mm(gf_norm.t())
+
+    dist_mat = dist_mat.mul(1 / qg_normdot).cpu().numpy()
+    dist_mat = np.clip(dist_mat, -1 + epsilon, 1 - epsilon)
+    dist_mat = np.arccos(dist_mat)
+    return dist_mat
+
+
+def _calculate_similarity(pre_fusion_tokens, post_fusion_tokens):
+    """
+    计算融合前后patch token的相似度
+
+    Args:
+        pre_fusion_tokens: 融合前patch token
+        post_fusion_tokens: 融合后patch token
+
+    Returns:
+        similarities: 融合前后patch token的相似度
+    """
+
+    # 计算余弦相似度
+    similarities = torch.nn.functional.cosine_similarity(pre_fusion_tokens, post_fusion_tokens,
+                                                         dim=-1).cpu().detach().numpy()
+
+    # # 将相似度平均到每个patch
+    # similarities = torch.mean(similarities, dim=1).squeeze().cpu().detach().numpy()
+
+    return similarities
+
+
+def visualize_similarity(pre_fusion_src_tokens, pre_fusion_tgt_tokens, post_fusion_src_tokens, post_fusion_tgt_tokens,
+                         writer=None, epoch=None, mode=1,
+                         pattern=None, figure_size=(6, 6), seaborn_style='whitegrid'):
+    """
+    可视化融合前后patch token的相似度分布
+
+    Args:
+        pre_fusion_src_tokens: 融合前源图像patch token
+        pre_fusion_tgt_tokens: 融合前目标图像patch token
+        post_fusion_src_tokens: 融合后源图像patch token
+        post_fusion_tgt_tokens: 融合后目标图像patch token
+        writer: tensorboardX SummaryWriter
+        epoch: epoch
+        mode: 模式，1代表源图像，2代表目标图像
+        pattern: 融合模式，r2t, r2n, n2t, n2r, t2r, t2n
+        figure_size: 图像大小
+        seaborn_style: seaborn风格
+
+    Returns:
+        None
+    """
+
+    # 计算融合前后patch token的相似度
+    similarities_ori = _calculate_similarity(pre_fusion_src_tokens, pre_fusion_tgt_tokens)
+    similarities = _calculate_similarity(post_fusion_src_tokens, post_fusion_tgt_tokens)
+
+    # 设置seaborn风格
+    sns.set(style=seaborn_style)
+
+    # 创建画图对象
+    fig, ax = plt.subplots(figsize=figure_size)
+
+    # 绘制融合前后相似度分布图
+    sns.kdeplot(similarities, color='b', label='Before MA', ax=ax, multiple="stack")
+    sns.kdeplot(similarities_ori, color='g', label='After MA', ax=ax, multiple="stack")
+
+    # 设置标题和标签
+    if pattern == 'r2t':
+        sign = 'R and T'
+    elif pattern == 'r2n':
+        sign = 'R and N'
+    elif pattern == 'n2t':
+        sign = 'N and T'
+    elif pattern == 'n2r':
+        sign = 'N and R'
+    elif pattern == 't2r':
+        sign = 'T and R'
+    elif pattern == 't2n':
+        sign = 'T and N'
+    plt.title("Similarity Distribution between {}".format(sign), fontsize=18, fontweight='bold')
+    plt.xlabel("Cosine Similarity", fontsize=16, fontweight='bold')
+    plt.ylabel("Density", fontsize=16, fontweight='bold')
+    # 设置x轴刻度标签大小
+    plt.xticks(fontsize=15)
+
+    # 设置y轴刻度标签大小
+    plt.yticks(fontsize=15)
+    # 添加图例
+    plt.legend(loc='upper right', fontsize=17)
+
+    # 显示图像
+    plt.show()
+
+    # 将图像写入tensorboard
+    if writer is not None:
+        writer.add_figure('Similarity_{}'.format(sign), plt.gcf(), epoch)

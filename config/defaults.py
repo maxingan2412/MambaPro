@@ -10,18 +10,13 @@ _C.MODEL.DEVICE = "cuda"
 # ID number of GPU
 _C.MODEL.DEVICE_ID = '0'
 # Name of backbone
-_C.MODEL.NAME = 'TOPReID'
+_C.MODEL.NAME = 'MambaPro'
 # The layer where we extract feature from the ViT backbone
 _C.MODEL.LAYER = -1
 # Path to pretrained model of backbone
 _C.MODEL.PRETRAIN_PATH_T = '/path/to/your/vitb_16_224_21k.pth'
 # Use ImageNet pretrained model to initialize backbone or use self trained model to initialize the whole model
 # Options: 'imagenet' or 'self'
-_C.MODEL.PRETRAIN_CHOICE = 'clip'
-# Index of Baseline, if 1, it means baseline
-_C.MODEL.BASE = 2
-# If train with CRM
-_C.MODEL.RE = 1
 # If train with BNNeck, options: 'bnneck' or 'no'
 _C.MODEL.NECK = 'bnneck'
 # If train loss include center loss, options: 'yes' or 'no'. Loss with center loss has different optimizer configuration
@@ -35,12 +30,15 @@ _C.MODEL.FLOPS_TEST = False
 _C.MODEL.METRIC_LOSS_TYPE = 'triplet'
 # If train with multi-gpu ddp mode, options: 'True', 'False'
 _C.MODEL.DIST_TRAIN = False
+_C.MODEL.PROMPT = True  # Whether use the prompt tuning
+_C.MODEL.MAMBA = True # whether use the mamba
+_C.MODEL.MAMBA_BI = False # whether use the bidirectional mamba
+_C.MODEL.ADAPTER = True # whether use the adapter
+_C.MODEL.FROZEN = True # whether freeze the backbone
 # If train with label smooth, options: 'on', 'off'
 _C.MODEL.IF_LABELSMOOTH = 'on'
 # If train with the contact feature
 _C.MODEL.DIRECT = 1
-# The depth of the CRM
-_C.MODEL.RE_LAYER = 1
 
 # Transformer setting
 _C.MODEL.DROP_PATH = 0.1
@@ -55,7 +53,6 @@ _C.MODEL.SIE_COE = 3.0
 _C.MODEL.SIE_CAMERA = True
 _C.MODEL.SIE_VIEW = False  # We do not use this parameter
 
-_C.MODEL.STAGE = 2  # We do not use this parameter
 
 # -----------------------------------------------------------------------------
 # INPUT

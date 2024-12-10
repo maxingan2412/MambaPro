@@ -363,39 +363,23 @@ def selective_scan_flop_jit(inputs, outputs):
     return flops
 
 
+def weights_init_kaiming(m):
+    classname = m.__class__.__name__
+    if classname.find('Linear') != -1:
+        nn.init.kaiming_normal_(m.weight, a=0, mode='fan_out')
+
+    elif classname.find('Conv') != -1:
+        nn.init.kaiming_normal_(m.weight, a=0, mode='fan_in')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+    elif classname.find('BatchNorm') != -1:
+        if m.affine:
+            nn.init.constant_(m.weight, 1.0)
+            nn.init.constant_(m.bias, 0.0)
+
+
 # =====================================================
-
-class PatchMerging2D(nn.Module):
-    def __init__(self, dim, out_dim=-1, norm_layer=nn.LayerNorm):
-        super().__init__()
-        self.dim = dim
-        self.reduction = nn.Linear(4 * dim, (2 * dim) if out_dim < 0 else out_dim, bias=False)
-        self.norm = norm_layer(4 * dim)
-
-    @staticmethod
-    def _patch_merging_pad(x: torch.Tensor):
-        H, W, _ = x.shape[-3:]
-        if (W % 2 != 0) or (H % 2 != 0):
-            x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
-        x0 = x[..., 0::2, 0::2, :]  # ... H/2 W/2 C
-        x1 = x[..., 1::2, 0::2, :]  # ... H/2 W/2 C
-        x2 = x[..., 0::2, 1::2, :]  # ... H/2 W/2 C
-        x3 = x[..., 1::2, 1::2, :]  # ... H/2 W/2 C
-        x = torch.cat([x0, x1, x2, x3], -1)  # ... H/2 W/2 4*C
-        return x
-
-    def forward(self, x):
-        x = self._patch_merging_pad(x)
-        x = self.norm(x)
-        x = self.reduction(x)
-
-        return x
-
-
-DEV = False
-
-
-class SS2D(nn.Module):
+class SSM(nn.Module):
     def __init__(
             self,
             # basic dims ===========
@@ -403,13 +387,6 @@ class SS2D(nn.Module):
             d_state=4,
             ssm_ratio=2,
             dt_rank="auto",
-            # dwconv ===============
-            # d_conv=-1, # < 2 means no conv
-            d_conv=3,  # < 2 means no conv
-            conv_bias=True,
-            # ======================
-            dropout=0.,
-            bias=False,
             # dt init ==============
             dt_min=0.001,
             dt_max=0.1,
@@ -417,93 +394,28 @@ class SS2D(nn.Module):
             dt_scale=1.0,
             dt_init_floor=1e-4,
             # ======================
-            softmax_version=False,
-            # ======================
-            cfg=None,
-            # ======================
             **kwargs,
     ):
-        if DEV:
-            d_conv = -1
-
-        self.size = [16, 8] if cfg.DATASETS.NAMES == 'RGBNT201' else [8, 16]
         factory_kwargs = {"device": None, "dtype": None}
         super().__init__()
-        self.softmax_version = softmax_version
         self.d_model = d_model
         self.d_state = math.ceil(self.d_model / 6) if d_state == "auto" else d_state  # 20240109
-        self.d_conv = d_conv
         self.expand = ssm_ratio
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
 
-        self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
-
-        # conv_sep =======================================
-        self.conv2d_r = nn.Sequential(nn.Conv2d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
-            groups=self.d_inner,
-            bias=conv_bias,
-            kernel_size=d_conv,
-            padding=(d_conv - 1) // 2,
-            **factory_kwargs,
-        ), nn.BatchNorm2d(self.d_inner), nn.SiLU())
-
-        self.conv2d_n = nn.Sequential(nn.Conv2d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
-            groups=self.d_inner,
-            bias=conv_bias,
-            kernel_size=d_conv,
-            padding=(d_conv - 1) // 2,
-            **factory_kwargs,
-        ), nn.BatchNorm2d(self.d_inner), nn.SiLU())
-
-        self.conv2d_t = nn.Sequential(nn.Conv2d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
-            groups=self.d_inner,
-            bias=conv_bias,
-            kernel_size=d_conv,
-            padding=(d_conv - 1) // 2,
-            **factory_kwargs,
-        ), nn.BatchNorm2d(self.d_inner), nn.SiLU())
-
-        # linear_side =======================================
-        self.side_linear = nn.Sequential(nn.Linear(3 * self.d_model, 3 * self.d_model, bias=bias, **factory_kwargs),
-                                         nn.LayerNorm(3 * self.d_model))
-
         # x proj; dt proj ============================
-        self.K = 4
-        self.x_proj = [
-            nn.Linear(self.d_inner, (self.dt_rank + self.d_state * 2), bias=False, **factory_kwargs)
-            for _ in range(self.K)
-        ]
-        self.x_proj_weight = nn.Parameter(torch.stack([t.weight for t in self.x_proj], dim=0))  # (K, N, inner)
-        del self.x_proj
+        self.x_proj = nn.Linear(self.d_inner, (self.dt_rank + self.d_state * 2), bias=False, **factory_kwargs)
 
-        self.dt_projs = [
-            self.dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor, **factory_kwargs)
-            for _ in range(self.K)
-        ]
-        self.dt_projs_weight = nn.Parameter(torch.stack([t.weight for t in self.dt_projs], dim=0))  # (K, inner, rank)
-        self.dt_projs_bias = nn.Parameter(torch.stack([t.bias for t in self.dt_projs], dim=0))  # (K, inner)
-        del self.dt_projs
+        self.dt_proj = self.dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor,
+                                    **factory_kwargs)
 
         # A, D =======================================
-        self.K2 = self.K
-        self.A_logs = self.A_log_init(self.d_state, self.d_inner, copies=self.K2, merge=True)  # (K * D, N)
-        self.Ds = self.D_init(self.d_inner, copies=self.K2, merge=True)  # (K * D)
+        self.A_log = self.A_log_init(self.d_state, self.d_inner)  # (D, N)
+        self.D = self.D_init(self.d_inner)  # (D)
 
-        # out proj =======================================
-        if not self.softmax_version:
-            self.out_norm = nn.LayerNorm(self.d_inner)
-        self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
-        self.dropout = nn.Dropout(dropout) if dropout > 0. else nn.Identity()
-
-        self.norm = nn.LayerNorm(self.d_model)
-        self.drop_path = DropPath(dropout) if dropout > 0. else nn.Identity()
+        # out norm ===================================
+        self.out_norm = nn.LayerNorm(self.d_inner)
 
     @staticmethod
     def dt_init(dt_rank, d_inner, dt_scale=1.0, dt_init="random", dt_min=0.001, dt_max=0.1, dt_init_floor=1e-4,
@@ -562,57 +474,147 @@ class SS2D(nn.Module):
         D._no_weight_decay = True
         return D
 
-    def forward_core(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor):
         selective_scan = selective_scan_fn
+        B, L, d = x.shape
+        x = x.permute(0, 2, 1)
+        x_dbl = self.x_proj(rearrange(x, "b d l -> (b l) d"))  # (bl d)
+        dt, B, C = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
+        dt = self.dt_proj.weight @ dt.t()
+        dt = rearrange(dt, "d (b l) -> b d l", l=L)
+        A = -torch.exp(self.A_log.float())  # (k * d, d_state)
+        B = rearrange(B, "(b l) dstate -> b dstate l", l=L).contiguous()
+        C = rearrange(C, "(b l) dstate -> b dstate l", l=L).contiguous()
 
-        B, C, H, W = x.shape
-        L = H * W
-        K = 4
-
-        x_hwwh = torch.stack([x.view(B, -1, L), torch.transpose(x, dim0=2, dim1=3).contiguous().view(B, -1, L)],
-                             dim=1).view(B, 2, -1, L)
-        xs = torch.cat([x_hwwh, torch.flip(x_hwwh, dims=[-1])], dim=1)  # (b, k, d, l)
-
-        x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs, self.x_proj_weight)
-        # x_dbl = x_dbl + self.x_proj_bias.view(1, K, -1, 1)
-        dts, Bs, Cs = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=2)
-        dts = torch.einsum("b k r l, k d r -> b k d l", dts, self.dt_projs_weight)
-
-        xs = xs.float().view(B, -1, L)  # (b, k * d, l)
-        dts = dts.contiguous().float().view(B, -1, L)  # (b, k * d, l)
-        Bs = Bs.float()  # (b, k, d_state, l)
-        Cs = Cs.float()  # (b, k, d_state, l)
-
-        As = -torch.exp(self.A_logs.float())  # (k * d, d_state)
-        Ds = self.Ds.float()  # (k * d)
-        dt_projs_bias = self.dt_projs_bias.float().view(-1)  # (k * d)
-
-        # assert len(xs.shape) == 3 and len(dts.shape) == 3 and len(Bs.shape) == 4 and len(Cs.shape) == 4
-        # assert len(As.shape) == 2 and len(Ds.shape) == 1 and len(dt_projs_bias.shape) == 1
-
-        out_y = selective_scan(
-            xs, dts,
-            As, Bs, Cs, Ds,
-            delta_bias=dt_projs_bias,
+        y = selective_scan(
+            x, dt,
+            A, B, C, self.D.float(),
+            delta_bias=self.dt_proj.bias.float(),
             delta_softplus=True,
-        ).view(B, K, -1, L)
+        )
         # assert out_y.dtype == torch.float
-
-        inv_y = torch.flip(out_y[:, 2:4], dims=[-1]).view(B, 2, -1, L)
-        wh_y = torch.transpose(out_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
-        invwh_y = torch.transpose(inv_y[:, 1].view(B, -1, W, H), dim0=2, dim1=3).contiguous().view(B, -1, L)
-        y = out_y[:, 0] + inv_y[:, 0] + wh_y + invwh_y
-        y = torch.transpose(y, dim0=1, dim1=2)
+        y = rearrange(y, "b d l -> b l d")
         y = self.out_norm(y)
-
         return y
+
+
+# SS2D ===============================================
+class SS2D_intra(nn.Module):
+    def __init__(
+            self,
+            # basic dims ===========
+            d_model=96,
+            d_state=16,
+            ssm_ratio=2,
+            dt_rank="auto",
+            # dwconv ===============
+            # d_conv=-1, # < 2 means no conv
+            d_conv=3,  # < 2 means no conv
+            conv_bias=True,
+            # ======================
+            dropout=0.,
+            bias=False,
+            # dt init ==============
+            dt_min=0.001,
+            dt_max=0.1,
+            dt_init="random",
+            dt_scale=1.0,
+            dt_init_floor=1e-4,
+            # ======================
+            softmax_version=False,
+            # ======================
+            cfg=None,
+            # ======================
+            **kwargs,
+    ):
+        factory_kwargs = {"device": None, "dtype": None}
+        super().__init__()
+        self.size = [16, 8] if cfg.DATASETS.NAMES == 'RGBNT201' else [8, 16]
+        self.softmax_version = softmax_version
+        self.d_model = d_model
+        self.d_state = math.ceil(self.d_model / 6) if d_state == "auto" else d_state  # 20240109
+        self.d_conv = d_conv
+        self.expand = ssm_ratio
+        self.d_inner = int(self.expand * self.d_model)
+        self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
+        self.bi = cfg.MODEL.MAMBA_BI
+
+        # in proj =======================================
+        self.in_proj_r = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        self.in_proj_n = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        self.in_proj_t = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        # conv_sep =======================================
+        self.conv2d_r = nn.Sequential(nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            groups=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+            **factory_kwargs,
+        ),  nn.BatchNorm2d(self.d_inner),nn.SiLU())
+
+        self.conv2d_n = nn.Sequential(nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            groups=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+            **factory_kwargs,
+        ),  nn.BatchNorm2d(self.d_inner),nn.SiLU())
+
+        self.conv2d_t = nn.Sequential(nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            groups=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+            **factory_kwargs,
+        ), nn.BatchNorm2d(self.d_inner),nn.SiLU())
+
+        self.SSM_r_f = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+        self.SSM_n_f = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+        self.SSM_t_f = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+        if self.bi:
+            self.SSM_r_b = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+            self.SSM_n_b = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+            self.SSM_t_b = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+
+        # out proj =======================================
+        self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        self.dropout = nn.Dropout(dropout) if dropout > 0. else nn.Identity()
+
+    def ssm_one(self, r, n, t):
+        y = torch.cat([r, n, t], dim=1)
+        out = self.SSM_1(y)
+        return out
+
+    def ssm_stage_1(self, r, n, t):
+        forward_r = r
+        forward_n = n
+        forward_t = t
+        if self.bi:
+            backward_r = torch.flip(r, dims=[1])
+            backward_n = torch.flip(n, dims=[1])
+            backward_t = torch.flip(t, dims=[1])
+            y_r = self.SSM_r_f(forward_r) + torch.flip(self.SSM_r_b(backward_r), dims=[1])
+            y_n = self.SSM_n_f(forward_n) + torch.flip(self.SSM_n_b(backward_n), dims=[1])
+            y_t = self.SSM_t_f(forward_t) + torch.flip(self.SSM_t_b(backward_t), dims=[1])
+
+        else:
+            y_r = self.SSM_r_f(forward_r)
+            y_n = self.SSM_n_f(forward_n)
+            y_t = self.SSM_t_f(forward_t)
+        return torch.cat([y_r, y_n, y_t], dim=1)
 
     def conv_sep(self, r, n, t):
         B, N, D = r.shape
 
-        xz_r = self.in_proj(r)
-        xz_n = self.in_proj(n)
-        xz_t = self.in_proj(t)
+        xz_r = self.in_proj_r(r)
+        xz_n = self.in_proj_n(n)
+        xz_t = self.in_proj_t(t)
 
         x_r, z_r = xz_r.chunk(2, dim=-1)
         x_n, z_n = xz_n.chunk(2, dim=-1)
@@ -626,36 +628,171 @@ class SS2D(nn.Module):
         x_n = self.conv2d_n(x_n)
         x_t = self.conv2d_t(x_t)
 
-        x = torch.cat([x_r, x_n, x_t], dim=-1)
+        x_r = x_r.permute(0, 2, 3, 1).reshape(B, N, -1)
+        x_n = x_n.permute(0, 2, 3, 1).reshape(B, N, -1)
+        x_t = x_t.permute(0, 2, 3, 1).reshape(B, N, -1)
+
         z = torch.cat([z_r, z_n, z_t], dim=1)
-        y = self.forward_core(x)
+        y = self.ssm_stage_1(x_r, x_n, x_t)
         y = y * F.silu(z)
+
         out = self.dropout(self.out_proj(y))
         new_r = out[:, :N]
         new_n = out[:, N:2 * N]
         new_t = out[:, 2 * N:]
         return new_r, new_n, new_t
 
-    def forward(self, r_,n_,t_, **kwargs):
-        D = r_.shape[-1]
-        r = self.norm(r_)
-        n = self.norm(n_)
-        t = self.norm(t_)
+    def forward(self, r, n, t, **kwargs):
         new_r, new_n, new_t = self.conv_sep(r, n, t)
-        side_input = self.side_linear(torch.cat([r, n, t], dim=2))
-        new_r = side_input[:, :, :D] + self.drop_path(new_r)
-        new_n = side_input[:, :, D:2 * D] + self.drop_path(new_n)
-        new_t = side_input[:, :, 2 * D:] + self.drop_path(new_t)
-        return r_ + new_r, n_ + new_n, t_ + new_t
+        return r + new_r, n + new_n, t + new_t
 
-    # def forward_(self, x: torch.Tensor, **kwargs):
-    #     b, n, d = x.shape
-    #     x = x.reshape(b, self.size[0], self.size[1], d)
-    #     xz = self.in_proj(x)
-    #     x, z = xz.chunk(2, dim=-1)  # (b, h, w, d)
-    #     x = x.permute(0, 3, 1, 2).contiguous()
-    #     x = self.act(self.conv2d(x))  # (b, d, h, w)
-    #     y = self.forward_core(x)
-    #     y = y * F.silu(z)
-    #     out = self.dropout(self.out_proj(y))
-    #     return out.reshape(b, n, d)
+
+# SS2D ===============================================
+class SS2D_inter(nn.Module):
+    def __init__(
+            self,
+            # basic dims ===========
+            d_model=96,
+            d_state=4,
+            ssm_ratio=2,
+            dt_rank="auto",
+            # dwconv ===============
+            # d_conv=-1, # < 2 means no conv
+            d_conv=3,  # < 2 means no conv
+            conv_bias=True,
+            # ======================
+            dropout=0.,
+            bias=False,
+            # dt init ==============
+            dt_min=0.001,
+            dt_max=0.1,
+            dt_init="random",
+            dt_scale=1.0,
+            dt_init_floor=1e-4,
+            # ======================
+            softmax_version=False,
+            # ======================
+            cfg=None,
+            # ======================
+            **kwargs,
+    ):
+        self.size = [16, 8] if cfg.DATASETS.NAMES == 'RGBNT201' else [8, 16]
+        factory_kwargs = {"device": None, "dtype": None}
+        super().__init__()
+        self.softmax_version = softmax_version
+        self.d_model = d_model
+        self.d_state = math.ceil(self.d_model / 6) if d_state == "auto" else d_state  # 20240109
+        self.d_conv = d_conv
+        self.expand = ssm_ratio
+        self.d_inner = int(self.expand * self.d_model)
+        self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
+        self.bi = cfg.MODEL.MAMBA_BI
+
+        # in proj =======================================
+        self.in_proj_r = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        self.in_proj_n = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        self.in_proj_t = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        # conv_sep =======================================
+        self.conv2d_r = nn.Sequential(nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            groups=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+            **factory_kwargs,
+        ), nn.BatchNorm2d(self.d_inner),nn.SiLU())
+
+        self.conv2d_n = nn.Sequential(nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            groups=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+            **factory_kwargs,
+        ), nn.BatchNorm2d(self.d_inner),nn.SiLU())
+
+        self.conv2d_t = nn.Sequential(nn.Conv2d(
+            in_channels=self.d_inner,
+            out_channels=self.d_inner,
+            groups=self.d_inner,
+            bias=conv_bias,
+            kernel_size=d_conv,
+            padding=(d_conv - 1) // 2,
+            **factory_kwargs,
+        ),  nn.BatchNorm2d(self.d_inner),nn.SiLU())
+
+        self.SSM_2_f = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+        if self.bi:
+            self.SSM_2_b = SSM(d_model=self.d_model, d_state=self.d_state, ssm_ratio=self.expand, dt_rank=self.dt_rank)
+
+        # out proj =======================================
+        self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        self.dropout = nn.Dropout(dropout) if dropout > 0. else nn.Identity()
+
+    def ssm_one(self, r, n, t):
+        y = torch.cat([r, n, t], dim=1)
+        out = self.SSM_1(y)
+        return out
+
+    def ssm_stage_2(self, r, n, t, ):
+        x_for = torch.cat([r, n, t], dim=1)
+        y_for = self.SSM_2_f(x_for)
+        if self.bi:
+            x_back = torch.flip(x_for, dims=[1])
+            y_back = self.SSM_2_b(x_back)
+            y_back = torch.flip(y_back, dims=[1])
+            return y_for + y_back
+        else:
+            return y_for
+
+    def conv_sep(self, r, n, t):
+        B, N, D = r.shape
+
+        xz_r = self.in_proj_r(r)
+        xz_n = self.in_proj_n(n)
+        xz_t = self.in_proj_t(t)
+
+        x_r, z_r = xz_r.chunk(2, dim=-1)
+        x_n, z_n = xz_n.chunk(2, dim=-1)
+        x_t, z_t = xz_t.chunk(2, dim=-1)
+
+        x_r = x_r.reshape(B, self.size[0], self.size[1], -1).permute(0, 3, 1, 2).contiguous()
+        x_n = x_n.reshape(B, self.size[0], self.size[1], -1).permute(0, 3, 1, 2).contiguous()
+        x_t = x_t.reshape(B, self.size[0], self.size[1], -1).permute(0, 3, 1, 2).contiguous()
+
+        x_r = self.conv2d_r(x_r)
+        x_n = self.conv2d_n(x_n)
+        x_t = self.conv2d_t(x_t)
+
+        x_r = x_r.permute(0, 2, 3, 1).reshape(B, N, -1)
+        x_n = x_n.permute(0, 2, 3, 1).reshape(B, N, -1)
+        x_t = x_t.permute(0, 2, 3, 1).reshape(B, N, -1)
+
+        z = torch.cat([z_r, z_n, z_t], dim=1)
+        y = self.ssm_stage_2(x_r, x_n, x_t)
+        y = y * F.silu(z)
+
+        out = self.dropout(self.out_proj(y))
+        new_r = out[:, :N]
+        new_n = out[:, N:2 * N]
+        new_t = out[:, 2 * N:]
+        return new_r, new_n, new_t
+
+    def forward(self, r, n, t, **kwargs):
+        new_r, new_n, new_t = self.conv_sep(r, n, t)
+        return r + new_r, n + new_n, t + new_t
+
+
+class MM_SS2D(nn.Module):
+    def __init__(self, d_model, cfg=None,dt_rank = "auto",d_state = 16, **kwargs):
+        super(MM_SS2D, self).__init__()
+        dt_rank = math.ceil(d_model / 16) if dt_rank == "auto" else dt_rank
+        self.SSM_intra = SS2D_intra(d_model=d_model, d_state=d_state, cfg=cfg,dt_rank=dt_rank)
+        self.SSM_inter = SS2D_inter(d_model=d_model, d_state=d_state, cfg=cfg,dt_rank=dt_rank)
+
+    def forward(self, r, n, t, **kwargs):
+        r, n, t = self.SSM_intra(r, n, t)
+        r, n, t = self.SSM_inter(r, n, t)
+        return r, n, t

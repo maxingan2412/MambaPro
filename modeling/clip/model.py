@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from modeling.backbones.vit_pytorch import trunc_normal_
+from modeling.clip.LoRA import LoRA_Linear
 
 
 class Bottleneck(nn.Module):
@@ -178,17 +179,29 @@ class ResidualAttentionBlock(nn.Module):
         ]))
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
-        self.k = 4
 
-        self.adapter_transfer = nn.Sequential(nn.Linear(d_model, d_model // 2), QuickGELU(),
-                                              nn.Linear(d_model // 2, d_model))
+        self.k = 4
+        self.begin = -1
+        dropout = 0.0
         self.adapter_prompt_rgb = nn.Parameter(torch.zeros(self.k, d_model))
         self.adapter_prompt_nir = nn.Parameter(torch.zeros(self.k, d_model))
         self.adapter_prompt_tir = nn.Parameter(torch.zeros(self.k, d_model))
-
-        self.adapter_r = nn.Sequential(nn.Linear(d_model, d_model), QuickGELU())
-        self.adapter_n = nn.Sequential(nn.Linear(d_model, d_model), QuickGELU())
-        self.adapter_t = nn.Sequential(nn.Linear(d_model, d_model), QuickGELU())
+        self.adapter_transfer = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                              QuickGELU(),
+                                              nn.Dropout(dropout),
+                                              nn.Linear(int(d_model // 2), int(d_model)))
+        self.adapter_r = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                       QuickGELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(int(d_model // 2), int(d_model)))
+        self.adapter_n = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                       QuickGELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(int(d_model // 2), int(d_model)))
+        self.adapter_t = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                       QuickGELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(int(d_model // 2), int(d_model)))
 
         self.adapter_ffn = nn.Sequential(nn.Linear(d_model, int(d_model * 2)),
                                          QuickGELU(),
@@ -209,12 +222,83 @@ class ResidualAttentionBlock(nn.Module):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
         return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
 
-    def forward(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
+    def forward_ori(self, x: torch.Tensor):
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+    def forward_with_adapter(self, x: torch.Tensor):
+        x = x + self.attention(self.ln_1(x))
+        adapter_ffn = self.adapter_ffn(x)
+        x = x + self.mlp(self.ln_2(x)) + adapter_ffn
+        return x
+
+    def forward_with_prompt_only_first_layer(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
+        if modality == 'rgb':
+            if index ==0:
+                n2r = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                    self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                t2r = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                    self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                r = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1)
+            elif index ==1:
+                r = last_prompt + self.adapter_transfer(last_prompt)
+                n2r = last_prompt
+                t2r = last_prompt
+            else:
+                r = last_prompt
+                n2r = last_prompt
+                t2r = last_prompt
+            x = torch.cat([x, r, n2r, t2r], dim=0)
+        elif modality == 'nir':
+            if index ==0:
+                r2n = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                    self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+                t2n = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                    self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                n = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            elif index ==1:
+                n = last_prompt + self.adapter_transfer(last_prompt)
+                r2n = last_prompt
+                t2n = last_prompt
+            else:
+                n = last_prompt
+                r2n = last_prompt
+                t2n = last_prompt
+            x = torch.cat([x, r2n, n, t2n], dim=0)
+        elif modality == 'tir':
+            if index ==0:
+                r2t = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                    self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+                n2t = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                    self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                t = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            elif index ==1:
+                t = last_prompt + self.adapter_transfer(last_prompt)
+                r2t = last_prompt
+                n2t = last_prompt
+            else:
+                t = last_prompt
+                r2t = last_prompt
+                n2t = last_prompt
+            x = torch.cat([x, r2t, n2t, t], dim=0)
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        prompt_current = (x[-3 * self.k:-2 * self.k] + x[-2 * self.k:-1 * self.k] + x[-1 * self.k:]) / 3
+        if modality == 'rgb':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'nir':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'tir':
+            return x[:-3 * self.k], prompt_current
+
+
+    def forward_with_prompt(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
         if modality == 'rgb':
             n2r = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
-                self.adapter_prompt_nir).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
             t2r = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
-                self.adapter_prompt_tir).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
             if last_prompt != None:
                 r = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_rgb.unsqueeze(1).expand(
                     -1, x.shape[1], -1))
@@ -223,9 +307,9 @@ class ResidualAttentionBlock(nn.Module):
             x = torch.cat([x, r, n2r, t2r], dim=0)
         elif modality == 'nir':
             r2n = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
-                self.adapter_prompt_rgb).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
             t2n = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
-                self.adapter_prompt_tir).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
             if last_prompt != None:
                 n = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_nir.unsqueeze(1).expand(
                     -1, x.shape[1], -1))
@@ -234,9 +318,53 @@ class ResidualAttentionBlock(nn.Module):
             x = torch.cat([x, r2n, n, t2n], dim=0)
         elif modality == 'tir':
             r2t = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
-                self.adapter_prompt_rgb).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
             n2t = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
-                self.adapter_prompt_nir).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                t = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_tir.unsqueeze(
+                    1).expand(-1, x.shape[1], -1))
+            else:
+                t = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r2t, n2t, t], dim=0)
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        prompt_current = (x[-3 * self.k:-2 * self.k] + x[-2 * self.k:-1 * self.k] + x[-1 * self.k:]) / 3
+        if modality == 'rgb':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'nir':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'tir':
+            return x[:-3 * self.k], prompt_current
+
+    def forward_with_prompt_adapter(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
+        if modality == 'rgb':
+            n2r = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            t2r = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                r = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_rgb.unsqueeze(1).expand(
+                    -1, x.shape[1], -1))
+            else:
+                r = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r, n2r, t2r], dim=0)
+        elif modality == 'nir':
+            r2n = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+            t2n = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                n = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_nir.unsqueeze(1).expand(
+                    -1, x.shape[1], -1))
+            else:
+                n = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r2n, n, t2n], dim=0)
+        elif modality == 'tir':
+            r2t = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+            n2t = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
             if last_prompt != None:
                 t = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_tir.unsqueeze(
                     1).expand(-1, x.shape[1], -1))
@@ -247,12 +375,31 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.attention(self.ln_1(x))
         adapter_ffn = self.adapter_ffn(x)
         x = x + self.mlp(self.ln_2(x)) + adapter_ffn
+        prompt_current = (x[-3 * self.k:-2 * self.k] + x[-2 * self.k:-1 * self.k] + x[-1 * self.k:]) / 3
         if modality == 'rgb':
-            return x[:-3 * self.k], x[-3 * self.k:-2 * self.k]
+            return x[:-3 * self.k], prompt_current
         elif modality == 'nir':
-            return x[:-3 * self.k], x[-2 * self.k:-1 * self.k]
+            return x[:-3 * self.k], prompt_current
         elif modality == 'tir':
-            return x[:-3 * self.k], x[-1 * self.k:]
+            return x[:-3 * self.k], prompt_current
+
+    def forward(self, x: torch.Tensor, modality=None, index=None, last_prompt=None, prompt_sign=True,
+                adapter_sign=True):
+        if prompt_sign and adapter_sign:
+            return self.forward_with_prompt_adapter(x, modality, index, last_prompt)
+        elif prompt_sign and not adapter_sign:
+            if index > self.begin:
+                return self.forward_with_prompt(x, modality, index, last_prompt)
+                # return self.forward_with_prompt_only_first_layer(x, modality, index, last_prompt)
+            else:
+                return self.forward_ori(x), None
+        elif not prompt_sign and adapter_sign:
+            if index > self.begin:
+                return self.forward_with_adapter(x)
+            else:
+                return self.forward_ori(x)
+        else:
+            return self.forward_ori(x)
 
 
 class Transformer(nn.Module):
@@ -268,8 +415,10 @@ class Transformer(nn.Module):
 
 class VisionTransformer(nn.Module):
     def __init__(self, h_resolution: int, w_resolution: int, patch_size: int, stride_size: int, width: int, layers: int,
-                 heads: int, output_dim: int):
+                 heads: int, output_dim: int, cfg: dict):
         super().__init__()
+        self.prompt_sign = cfg.MODEL.PROMPT
+        self.adapter_sign = cfg.MODEL.ADAPTER
         self.h_resolution = h_resolution
         self.w_resolution = w_resolution
         self.output_dim = output_dim
@@ -301,12 +450,25 @@ class VisionTransformer(nn.Module):
 
         x = x.permute(1, 0, 2)  # NLD -> LND
         for i in range(len(self.transformer.resblocks)):
-            if i == 0:
-                x, last_prompt = self.transformer.resblocks[i](x, modality, i, None)
+            if self.prompt_sign and self.adapter_sign:
+                if i == 0:
+                    x, last_prompt = self.transformer.resblocks[i](x, modality, i, None, prompt_sign=True,
+                                                                   adapter_sign=True)
+                else:
+                    x, last_prompt = self.transformer.resblocks[i](x, modality, i, last_prompt, prompt_sign=True,
+                                                                   adapter_sign=True)
+            elif self.prompt_sign and not self.adapter_sign:
+                if i == 0:
+                    x, last_prompt = self.transformer.resblocks[i](x, modality, i, None, prompt_sign=True,
+                                                                   adapter_sign=False)
+                else:
+                    x, last_prompt = self.transformer.resblocks[i](x, modality, i, last_prompt, prompt_sign=True,
+                                                                   adapter_sign=False)
+            elif not self.prompt_sign and self.adapter_sign:
+                x = self.transformer.resblocks[i](x, modality, i, None, prompt_sign=False, adapter_sign=True)
             else:
-                x, last_prompt = self.transformer.resblocks[i](x, modality, i, last_prompt)
+                x = self.transformer.resblocks[i](x, modality, i, None, prompt_sign=False, adapter_sign=False)
 
-        x = torch.cat([x, last_prompt], dim=0)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_post(x)
         if self.proj is not None:
@@ -314,86 +476,8 @@ class VisionTransformer(nn.Module):
         return xproj
 
 
-# class ResidualAttentionBlock(nn.Module):
-#     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
-#         super().__init__()
-#
-#         self.attn = nn.MultiheadAttention(d_model, n_head)
-#         self.ln_1 = LayerNorm(d_model)
-#         self.mlp = nn.Sequential(OrderedDict([
-#             ("c_fc", nn.Linear(d_model, d_model * 4)),
-#             ("gelu", QuickGELU()),
-#             ("c_proj", nn.Linear(d_model * 4, d_model))
-#         ]))
-#         self.ln_2 = LayerNorm(d_model)
-#         self.attn_mask = attn_mask
-#
-#     def attention(self, x: torch.Tensor):
-#         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-#         return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
-#
-#     def forward(self, x: torch.Tensor):
-#         x = x + self.attention(self.ln_1(x))
-#         x = x + self.mlp(self.ln_2(x))
-#         return x
-#
-#
-# class Transformer(nn.Module):
-#     def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
-#         super().__init__()
-#         self.width = width
-#         self.layers = layers
-#         self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
-#
-#     def forward(self, x: torch.Tensor):
-#         return self.resblocks(x)
-#
-#
-# class VisionTransformer(nn.Module):
-#     def __init__(self, h_resolution: int, w_resolution: int, patch_size: int, stride_size: int, width: int, layers: int,
-#                  heads: int, output_dim: int):
-#         super().__init__()
-#         self.h_resolution = h_resolution
-#         self.w_resolution = w_resolution
-#         self.output_dim = output_dim
-#         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=stride_size,
-#                                bias=False)
-#
-#         scale = width ** -0.5
-#         self.class_embedding = nn.Parameter(scale * torch.randn(width))
-#         self.positional_embedding = nn.Parameter(scale * torch.randn(h_resolution * w_resolution + 1, width))
-#         self.ln_pre = LayerNorm(width)
-#
-#         self.transformer = Transformer(width, layers, heads)
-#
-#         self.ln_post = LayerNorm(width)
-#         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
-#
-#     def forward(self, x: torch.Tensor, cv_emb=None,modality=None):
-#         x = self.conv1(x)  # shape = [*, width, grid, grid]
-#         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-#         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-#         x = torch.cat(
-#             [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
-#              x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-#         if cv_emb != None:
-#             x[:, 0] = x[:, 0] + cv_emb
-#         x = x + self.positional_embedding.to(x.dtype)
-#         x = self.ln_pre(x)
-#
-#         x = x.permute(1, 0, 2)  # NLD -> LND
-#
-#         x12 = self.transformer.resblocks(x)
-#         x12 = x12.permute(1, 0, 2)  # LND -> NLD
-#         x12 = self.ln_post(x12)
-#         if self.proj is not None:
-#             xproj = x12 @ self.proj
-#
-#         return xproj
-
-
 class CLIP(nn.Module):
-    def __init__(self,
+    def __init__(self, cfg,
                  embed_dim: int,
                  # vision
                  image_resolution: int,
@@ -433,7 +517,8 @@ class CLIP(nn.Module):
                 width=vision_width,
                 layers=vision_layers,
                 heads=vision_heads,
-                output_dim=embed_dim
+                output_dim=embed_dim,
+                cfg=cfg
             )
 
         self.transformer = Transformer(
@@ -551,7 +636,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, h_resolution: int, w_resolution: int, vision_stride_size: int):
+def build_model(cfg, state_dict: dict, h_resolution: int, w_resolution: int, vision_stride_size: int):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -578,12 +663,12 @@ def build_model(state_dict: dict, h_resolution: int, w_resolution: int, vision_s
     transformer_heads = transformer_width // 64
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
 
-    model = CLIP(
-        embed_dim,
-        image_resolution, vision_layers, vision_width, vision_patch_size, vision_stride_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers,
-        h_resolution, w_resolution
-    )
+    model = CLIP(cfg,
+                 embed_dim,
+                 image_resolution, vision_layers, vision_width, vision_patch_size, vision_stride_size,
+                 context_length, vocab_size, transformer_width, transformer_heads, transformer_layers,
+                 h_resolution, w_resolution
+                 )
     if vit:
         state_dict["visual.positional_embedding"] = resize_pos_embed(state_dict["visual.positional_embedding"],
                                                                      model.visual.positional_embedding, h_resolution,

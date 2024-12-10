@@ -9,6 +9,7 @@ from torch.cuda import amp
 import torch.distributed as dist
 from layers.supcontrast import SupConLoss
 
+
 def do_train(cfg,
              model,
              center_criterion,
@@ -26,7 +27,7 @@ def do_train(cfg,
     device = "cuda"
     epochs = cfg.SOLVER.MAX_EPOCHS
     logging.getLogger().setLevel(logging.INFO)
-    logger = logging.getLogger("TOPReID.train")
+    logger = logging.getLogger("MambaPro.train")
     logger.info('start training')
     _LOCAL_PROCESS_GROUP = None
     if device:
@@ -38,8 +39,6 @@ def do_train(cfg,
 
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
-    xent = SupConLoss(device)
-    mse = nn.MSELoss()
     if cfg.DATASETS.NAMES == "MSVR310":
         evaluator = R1_mAP(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     else:
@@ -172,7 +171,7 @@ def do_inference(cfg,
                  val_loader,
                  num_query):
     device = "cuda"
-    logger = logging.getLogger("TOPReID.test")
+    logger = logging.getLogger("MambaPro.test")
     logger.info("Enter inferencing")
 
     if cfg.DATASETS.NAMES == "MSVR310":

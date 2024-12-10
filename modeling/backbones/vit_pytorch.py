@@ -162,12 +162,15 @@ class Attention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
-        # if get_attn:
-        #     return attn
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+
+class QuickGELU(nn.Module):
+    def forward(self, x: torch.Tensor):
+        return x * torch.sigmoid(1.702 * x)
 
 
 class Block(nn.Module):
@@ -183,11 +186,211 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        d_model = dim
+        self.k = 4
+        self.begin = -1
+        dropout = 0.0
+        self.adapter_prompt_rgb = nn.Parameter(torch.zeros(self.k, d_model))
+        self.adapter_prompt_nir = nn.Parameter(torch.zeros(self.k, d_model))
+        self.adapter_prompt_tir = nn.Parameter(torch.zeros(self.k, d_model))
+        self.adapter_transfer = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                              QuickGELU(),
+                                              nn.Dropout(dropout),
+                                              nn.Linear(int(d_model // 2), int(d_model)))
+        self.adapter_r = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                       QuickGELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(int(d_model // 2), int(d_model)))
+        self.adapter_n = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                       QuickGELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(int(d_model // 2), int(d_model)))
+        self.adapter_t = nn.Sequential(nn.Linear(d_model, int(d_model // 2)),
+                                       QuickGELU(),
+                                       nn.Dropout(dropout),
+                                       nn.Linear(int(d_model // 2), int(d_model)))
 
-    def forward(self, x, get_att=False):
+        self.adapter_ffn = nn.Sequential(nn.Linear(d_model, int(d_model * 2)),
+                                         QuickGELU(),
+                                         nn.Linear(int(d_model * 2), int(d_model)))
+
+    def forward_ori(self, x: torch.Tensor):
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
+
+    def forward_with_adapter(self, x: torch.Tensor):
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        adapter_ffn = self.adapter_ffn(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x))) + adapter_ffn
+        return x
+
+    def forward_with_prompt_only_first_layer(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
+        if modality == 'rgb':
+            if index == 0:
+                n2r = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                    self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                t2r = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                    self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                r = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1)
+            elif index == 1:
+                r = last_prompt + self.adapter_transfer(last_prompt)
+                n2r = last_prompt
+                t2r = last_prompt
+            else:
+                r = last_prompt
+                n2r = last_prompt
+                t2r = last_prompt
+            x = torch.cat([x, r, n2r, t2r], dim=0)
+        elif modality == 'nir':
+            if index == 0:
+                r2n = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                    self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+                t2n = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                    self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                n = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            elif index == 1:
+                n = last_prompt + self.adapter_transfer(last_prompt)
+                r2n = last_prompt
+                t2n = last_prompt
+            else:
+                n = last_prompt
+                r2n = last_prompt
+                t2n = last_prompt
+            x = torch.cat([x, r2n, n, t2n], dim=0)
+        elif modality == 'tir':
+            if index == 0:
+                r2t = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                    self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+                n2t = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                    self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+                t = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            elif index == 1:
+                t = last_prompt + self.adapter_transfer(last_prompt)
+                r2t = last_prompt
+                n2t = last_prompt
+            else:
+                t = last_prompt
+                r2t = last_prompt
+                n2t = last_prompt
+            x = torch.cat([x, r2t, n2t, t], dim=0)
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        prompt_current = (x[-3 * self.k:-2 * self.k] + x[-2 * self.k:-1 * self.k] + x[-1 * self.k:]) / 3
+        if modality == 'rgb':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'nir':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'tir':
+            return x[:-3 * self.k], prompt_current
+
+    def forward_with_prompt(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
+        if modality == 'rgb':
+            n2r = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            t2r = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                r = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_rgb.unsqueeze(1).expand(
+                    -1, x.shape[1], -1))
+            else:
+                r = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r, n2r, t2r], dim=0)
+        elif modality == 'nir':
+            r2n = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+            t2n = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                n = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_nir.unsqueeze(1).expand(
+                    -1, x.shape[1], -1))
+            else:
+                n = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r2n, n, t2n], dim=0)
+        elif modality == 'tir':
+            r2t = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+            n2t = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                t = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_tir.unsqueeze(
+                    1).expand(-1, x.shape[1], -1))
+            else:
+                t = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r2t, n2t, t], dim=0)
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        prompt_current = (x[-3 * self.k:-2 * self.k] + x[-2 * self.k:-1 * self.k] + x[-1 * self.k:]) / 3
+        if modality == 'rgb':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'nir':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'tir':
+            return x[:-3 * self.k], prompt_current
+
+    def forward_with_prompt_adapter(self, x: torch.Tensor, modality=None, index=None, last_prompt=None):
+        if modality == 'rgb':
+            n2r = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            t2r = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                r = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_rgb.unsqueeze(1).expand(
+                    -1, x.shape[1], -1))
+            else:
+                r = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r, n2r, t2r], dim=0)
+        elif modality == 'nir':
+            r2n = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+            t2n = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_t(
+                self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                n = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_nir.unsqueeze(1).expand(
+                    -1, x.shape[1], -1))
+            else:
+                n = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r2n, n, t2n], dim=0)
+        elif modality == 'tir':
+            r2t = self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_r(
+                self.adapter_prompt_rgb.unsqueeze(1).expand(-1, x.shape[1], -1))
+            n2t = self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1) + self.adapter_n(
+                self.adapter_prompt_nir.unsqueeze(1).expand(-1, x.shape[1], -1))
+            if last_prompt != None:
+                t = (last_prompt + self.adapter_transfer(last_prompt) + self.adapter_prompt_tir.unsqueeze(
+                    1).expand(-1, x.shape[1], -1))
+            else:
+                t = self.adapter_prompt_tir.unsqueeze(1).expand(-1, x.shape[1], -1)
+            x = torch.cat([x, r2t, n2t, t], dim=0)
+
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        adapter_ffn = self.adapter_ffn(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x))) + adapter_ffn
+        prompt_current = (x[-3 * self.k:-2 * self.k] + x[-2 * self.k:-1 * self.k] + x[-1 * self.k:]) / 3
+        if modality == 'rgb':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'nir':
+            return x[:-3 * self.k], prompt_current
+        elif modality == 'tir':
+            return x[:-3 * self.k], prompt_current
+
+    def forward(self, x: torch.Tensor, modality=None, index=None, last_prompt=None, prompt_sign=True,
+                adapter_sign=True):
+        if prompt_sign and adapter_sign:
+            return self.forward_with_prompt_adapter(x, modality, index, last_prompt)
+        elif prompt_sign and not adapter_sign:
+            if index > self.begin:
+                return self.forward_with_prompt(x, modality, index, last_prompt)
+                # return self.forward_with_prompt_only_first_layer(x, modality, index, last_prompt)
+            else:
+                return self.forward_ori(x), None
+        elif not prompt_sign and adapter_sign:
+            if index > self.begin:
+                return self.forward_with_adapter(x)
+            else:
+                return self.forward_ori(x)
+        else:
+            return self.forward_ori(x)
 
 
 class ReAttention(nn.Module):
@@ -332,7 +535,8 @@ class Trans(nn.Module):
                  depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0., camera=0,
                  view=0,
-                 drop_path_rate=0., hybrid_backbone=None, norm_layer=nn.LayerNorm, local_feature=False, sie_xishu=1.0):
+                 drop_path_rate=0., hybrid_backbone=None, norm_layer=nn.LayerNorm, local_feature=False, sie_xishu=1.0,
+                 cfg=None):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other resnest
@@ -346,7 +550,8 @@ class Trans(nn.Module):
                 embed_dim=embed_dim)
 
         num_patches = self.patch_embed.num_patches
-
+        self.prompt_sign = cfg.MODEL.PROMPT
+        self.adapter_sign = cfg.MODEL.ADAPTER
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.cam_num = camera
@@ -387,6 +592,8 @@ class Trans(nn.Module):
         self.fc = nn.Linear(embed_dim, 1000) if num_classes > 0 else nn.Identity()
         trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.pos_embed, std=.02)
+        scale = embed_dim ** -0.5
+        self.proj_special_vit = nn.Parameter(scale * torch.randn(embed_dim, 512))
 
         self.apply(self._init_weights)
 
@@ -410,7 +617,7 @@ class Trans(nn.Module):
         self.num_classes = num_classes
         self.fc = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, camera_id, view_id):
+    def forward_features(self, x, camera_id, view_id, modality=None):
         B = x.shape[0]
         x = self.patch_embed(x)
 
@@ -428,12 +635,31 @@ class Trans(nn.Module):
 
         x = self.pos_drop(x)
 
-        for index, blk in enumerate(self.blocks):
-            x = blk(x)
-        return self.norm(x)
+        for i in range(len(self.blocks)):
+            if self.prompt_sign and self.adapter_sign:
+                if i == 0:
+                    x, last_prompt = self.blocks[i](x, modality, i, None, prompt_sign=True,
+                                                    adapter_sign=True)
+                else:
+                    x, last_prompt = self.blocks[i](x, modality, i, last_prompt, prompt_sign=True,
+                                                    adapter_sign=True)
+            elif self.prompt_sign and not self.adapter_sign:
+                if i == 0:
+                    x, last_prompt = self.blocks[i](x, modality, i, None, prompt_sign=True,
+                                                    adapter_sign=False)
+                else:
+                    x, last_prompt = self.blocks[i](x, modality, i, last_prompt, prompt_sign=True,
+                                                    adapter_sign=False)
+            elif not self.prompt_sign and self.adapter_sign:
+                x = self.blocks[i](x, modality, i, None, prompt_sign=False, adapter_sign=True)
+            else:
+                x = self.blocks[i](x, modality, i, None, prompt_sign=False, adapter_sign=False)
 
-    def forward(self, x, cam_label=None, view_label=None):
-        x = self.forward_features(x, cam_label, view_label)
+        x = self.norm(x)
+        return x
+
+    def forward(self, x, cam_label=None, view_label=None, modality=None):
+        x = self.forward_features(x, cam_label, view_label, modality)
         return x
 
     def load_param(self, model_path):
@@ -484,51 +710,51 @@ def resize_pos_embed(posemb, posemb_new, hight, width):
 
 
 def vit_base_patch16_224(img_size=(256, 128), stride_size=16, drop_rate=0.0, attn_drop_rate=0.0,
-                         drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5, **kwargs):
+                         drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5,cfg=None, **kwargs):
     model = Trans(
         img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, \
         camera=camera, view=view, drop_path_rate=drop_path_rate, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), sie_xishu=sie_xishu, local_feature=local_feature, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), sie_xishu=sie_xishu, local_feature=local_feature,cfg=cfg,**kwargs)
 
     return model
 
 
 def vit_small_patch16_224(img_size=(256, 128), stride_size=16, drop_rate=0., attn_drop_rate=0.,
-                          drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5,
+                          drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5,cfg=None,
                           **kwargs):
     kwargs.setdefault('qk_scale', 768 ** -0.5)
     model = Trans(
         img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=768, depth=8, num_heads=8, mlp_ratio=3.,
         qkv_bias=False, drop_path_rate=drop_path_rate, \
         camera=camera, view=view, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), sie_xishu=sie_xishu, local_feature=local_feature, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), sie_xishu=sie_xishu, local_feature=local_feature,cfg=cfg, **kwargs)
 
     return model
 
 
 def deit_small_patch16_224(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, drop_rate=0.0,
-                           attn_drop_rate=0.0, camera=0, view=0, local_feature=False, sie_xishu=1.5,
+                           attn_drop_rate=0.0, camera=0, view=0, local_feature=False, sie_xishu=1.5,cfg=None,
                            **kwargs):
     model = Trans(
         img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True,
         drop_path_rate=drop_path_rate, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, camera=camera, view=view,
         sie_xishu=sie_xishu, local_feature=local_feature,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),cfg=cfg, **kwargs)
 
     return model
 
 
 def swin_small_patch16_224(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, drop_rate=0.0,
-                           attn_drop_rate=0.0, camera=0, view=0, local_feature=False, sie_xishu=1.5,
+                           attn_drop_rate=0.0, camera=0, view=0, local_feature=False, sie_xishu=1.5,cfg=None,
                            **kwargs):
     model = Trans(
         img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True,
         drop_path_rate=drop_path_rate, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, camera=camera, view=view,
         sie_xishu=sie_xishu, local_feature=local_feature,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),cfg=cfg, **kwargs)
 
     return model
 

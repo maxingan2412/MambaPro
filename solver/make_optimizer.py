@@ -11,9 +11,10 @@ def make_optimizer(cfg, model, center_criterion):
         if "bias" in key:
             lr = cfg.SOLVER.BASE_LR * cfg.SOLVER.BIAS_LR_FACTOR
             weight_decay = cfg.SOLVER.WEIGHT_DECAY_BIAS
-        # if "base" in key:
-        #     if "adapter" not in key:
-        #         lr = 0.000005
+        if not cfg.MODEL.FROZEN:
+            if "base" in key:
+                if "adapter" not in key:
+                    lr = 0.000005
         if cfg.SOLVER.LARGE_FC_LR:
             if "classifier" in key or "arcface" in key:
                 lr = cfg.SOLVER.BASE_LR * 2
