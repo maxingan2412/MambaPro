@@ -2,7 +2,7 @@
   <h1 align="center">MambaPro: Multi-Modal Object Re-Identification with Mamba Aggregation and Synergistic Prompt</h1>
 </p>
   <p align="center">
-    <img src="results/logo.png" alt="Description of the image" style="width:74%;">
+    <img src="results/logo.png" alt="Description of the image" style="width:54%;">
   <p align="center">
 <p align="center">
     <a href="https://scholar.google.com/citations?user=WZvjVLkAAAAJ&hl=zh-CN" rel="external nofollow noopener" target="_blank"><strong>Yuhao Wang</strong></a>
