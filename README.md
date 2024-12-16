@@ -135,12 +135,6 @@ python train_net.py --config_file configs/RGBNT201/MambaPro.yml
 
 ---
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=924973292/MambaPro&type=Date)](https://star-history.com/#924973292/MambaPro&Date)
-
----
-
 ## **Citation**
 
 If you find **MambaPro** helpful in your research, please consider citing:
