@@ -132,7 +132,7 @@ python train_net.py --config_file configs/RGBNT201/MambaPro.yml
 ```
 ### Note
 - If you want to use a CLIP-based framework for multi-modal object ReID, **[DeMo](https://github.com/924973292/DeMo)** is a better choice, the prompt/adapter tuning configuration in **MambaPro** is retained for users, besides, we provide detailed visualizations code in **DeMo**.
-- Thanks for your attention and support! 🙏
+- Thanks for your attention and support!
 
 
 ## Star History
