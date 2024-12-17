@@ -34,7 +34,7 @@
 
 ## News
 - We released the **MambaPro** codebase and paper! 🚀 [Paper](https://arxiv.org/pdf/2412.10707)
-- Great news! Our paper has been accepted to **AAAI 2025**! 🎉 [Paper](https://arxiv.org/pdf/2412.10707)
+- Great news! Our paper has been accepted to **AAAI 2025**! 🎉
 
 ---
 
