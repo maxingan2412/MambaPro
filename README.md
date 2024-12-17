@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-    <a href="https://arxiv.org/abs/2312.09612" rel="external nofollow noopener" target="_blank">AAAI 2025 Paper</a>
+    <a href="https://arxiv.org/pdf/2412.10707" rel="external nofollow noopener" target="_blank">AAAI 2025 Paper</a>
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 ---
 
 ## News
-Great news! Our paper has been accepted to **AAAI 2025**! 🎉 [Paper](https://arxiv.org/abs/2312.09612)
+Great news! Our paper has been accepted to **AAAI 2025**! 🎉 [Paper](https://arxiv.org/pdf/2412.10707)
 
 ---
 
