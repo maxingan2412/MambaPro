@@ -131,7 +131,6 @@ Multi-modal object ReID leverages complementary data from diverse modalities (e.
 source activate (your_env)
 cd (your_path)
 pip install -r requirements.txt
-cd selective_scan && pip install .
 python train_net.py --config_file configs/RGBNT201/MambaPro.yml
 ```
 
