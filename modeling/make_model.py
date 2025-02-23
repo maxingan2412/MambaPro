@@ -36,7 +36,7 @@ def weights_init_classifier(m):
 class build_transformer(nn.Module):
     def __init__(self, num_classes, cfg, camera_num, view_num, factory,feat_dim):
         super(build_transformer, self).__init__()
-        model_path = cfg.MODEL.PRETRAIN_PATH_T
+        model_path = cfg.MODEL.PRETRAIN_PATH_Tt
         self.in_planes = feat_dim
         self.cv_embed_sign = cfg.MODEL.SIE_CAMERA
         self.neck = cfg.MODEL.NECK
